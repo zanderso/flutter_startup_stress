@@ -1,0 +1,25 @@
+name: flutter_startup_stress
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.15.0-72.0.dev
+
+workspace:
+  - tools
+
+dependencies:
+  flutter:
+    sdk: flutter
+  material_ui: ^1.1.0
+
+dev_dependencies:
+  args: ^2.7.0
+  path: ^1.9.1
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
