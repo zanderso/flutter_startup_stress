@@ -1,3 +1,8 @@
+// Copyright 2026 The Flutter Authors.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -247,6 +252,14 @@ class RunCommand extends Command<int> {
         'device',
         abbr: 'd',
         help: 'Optional Android device serial passed to adb -s.',
+      )
+      ..addFlag(
+        'wait-for-quit',
+        abbr: 'w',
+        negatable: false,
+        help:
+            "Keep the app running and block until 'q' is pressed before "
+            'stopping and uninstalling it.',
       );
   }
 
@@ -273,6 +286,7 @@ class RunCommand extends Command<int> {
     final appPackage = args['package'] as String;
     final activity = args['activity'] as String;
     final durationMs = int.parse(args['duration-ms'] as String);
+    final waitForQuit = args['wait-for-quit'] as bool;
 
     String? suffix = args['suffix'] as String?;
     if ((suffix == null || suffix.isEmpty) && args.rest.isNotEmpty) {
@@ -385,14 +399,125 @@ duration_ms: $durationMs
       ]),
     );
 
-    // 6. Uninstall the app from the device.
+    // 6. Capture a screenshot of the rendered app before shutting down and
+    //    uninstalling it so visual correctness can be verified.
+    final screenshotFileName =
+        'flutter_startup${sanitizedSuffix}_$timestamp.png';
+    final localScreenshotPath = p.join(dataDir.path, screenshotFileName);
+    final screencapArgs = _adbArgs(deviceSerial, <String>[
+      'exec-out',
+      'screencap',
+      '-p',
+    ]);
+    stdout.writeln('+ $adb ${screencapArgs.join(' ')} > $localScreenshotPath');
+    final screencapProcess = await Process.start(adb, screencapArgs);
+    final screenshotFile = File(localScreenshotPath);
+    final sink = screenshotFile.openWrite();
+    await screencapProcess.stdout.pipe(sink);
+    final screencapStderr = await screencapProcess.stderr
+        .transform(utf8.decoder)
+        .join();
+    final screencapExit = await screencapProcess.exitCode;
+    if (screencapStderr.trim().isNotEmpty) {
+      stderr.writeln(screencapStderr.trim());
+    }
+    if (screencapExit != 0) {
+      throw ProcessException(
+        adb,
+        screencapArgs,
+        'screencap exited with code $screencapExit',
+        screencapExit,
+      );
+    }
+
+    stdout.writeln('Saved Perfetto trace to: $localTracePath');
+    stdout.writeln('Saved screenshot to: $localScreenshotPath');
+
+    if (waitForQuit) {
+      await _waitForQuitKey();
+    }
+
+    // 7. Shut down and uninstall the app from the device.
+    await _runChecked(
+      adb,
+      _adbArgs(deviceSerial, <String>['shell', 'am', 'force-stop', appPackage]),
+    );
     await _runChecked(
       adb,
       _adbArgs(deviceSerial, <String>['uninstall', appPackage]),
     );
 
-    stdout.writeln('Saved Perfetto trace to: $localTracePath');
     return 0;
+  }
+
+  static Future<void> _waitForQuitKey() async {
+    const int lowercaseQCodeUnit = 0x71; // 'q'
+    final bool hasTerminal = stdin.hasTerminal;
+    bool? previousEchoMode;
+    bool? previousLineMode;
+    StreamSubscription<ProcessSignal>? sigintSub;
+    StreamSubscription<ProcessSignal>? sigtermSub;
+
+    void restoreTerminalMode() {
+      if (!hasTerminal || !stdin.hasTerminal) {
+        return;
+      }
+      if (previousLineMode case final bool lineMode) {
+        stdin.lineMode = lineMode;
+        previousLineMode = null;
+      }
+      if (previousEchoMode case final bool echoMode) {
+        stdin.echoMode = echoMode;
+        previousEchoMode = null;
+      }
+    }
+
+    if (hasTerminal) {
+      previousEchoMode = stdin.echoMode;
+      previousLineMode = stdin.lineMode;
+      stdin.echoMode = false;
+      stdin.lineMode = false;
+
+      sigintSub = ProcessSignal.sigint.watch().listen((_) {
+        restoreTerminalMode();
+        exit(130);
+      });
+      if (!Platform.isWindows) {
+        sigtermSub = ProcessSignal.sigterm.watch().listen((_) {
+          restoreTerminalMode();
+          exit(143);
+        });
+      }
+    }
+
+    stdout.writeln(
+      "App is still running on device. Press 'q' to stop and uninstall it...",
+    );
+
+    final Completer<void> quitCompleter = Completer<void>();
+    StreamSubscription<List<int>>? stdinSub;
+    try {
+      stdinSub = stdin.listen(
+        (List<int> data) {
+          if (data.contains(lowercaseQCodeUnit) && !quitCompleter.isCompleted) {
+            quitCompleter.complete();
+          }
+        },
+        onDone: () {
+          if (!quitCompleter.isCompleted) {
+            quitCompleter.complete();
+          }
+        },
+      );
+      await quitCompleter.future;
+    } finally {
+      // Restore terminal modes before cancelling stdinSub, since cancelling the
+      // stdin subscription detaches fd 0 from the terminal in dart:io.
+      restoreTerminalMode();
+      await stdinSub?.cancel();
+      await sigintSub?.cancel();
+      await sigtermSub?.cancel();
+    }
   }
 
   static String _formatTimestamp(DateTime dt) {

@@ -32,9 +32,9 @@
             android:value="2" />
         <meta-data
             android:name="io.flutter.embedding.android.ImpellerBackend"
-            android:value="opengles" />
+            android:value="vulkan" />
         <meta-data
-            android:name="io.flutter.embedding.android.EnableOpenGLGPUTracing"
+            android:name="io.flutter.embedding.android.EnableVulkanGPUTracing"
             android:value="true" />
     </application>
     <!-- Required to query activities that can process text, see:
